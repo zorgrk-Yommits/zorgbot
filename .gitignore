@@ -1,0 +1,16 @@
+# Zorgbot - Git Ignore
+
+# Sensitive data
+.env
+.zorgbot-credentials
+../.zorgbot-credentials
+
+# Node modules
+node_modules/
+package-lock.json
+
+# Logs
+*.log
+
+# Test outputs
+test-*.js
