@@ -5,7 +5,7 @@
  * Auto-Routing: mistral-small → mistral-large
  */
 
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
 const MistralBot = require('./mistral-bot.js');
 const ZorgbotCommands = require('./zorgbot-commands.js');
 const fs = require('fs');
@@ -35,16 +35,7 @@ class Zorgbot {
     this.commands = new ZorgbotCommands();
     
     // System prompt with rules
-    this.systemPrompt = `You are Zorgbot, a helpful AI assistant for the Supra Heroes Discord community.
-
-STRICT RULES:
-1. ENGLISH ONLY - Always respond in English, regardless of the user's language
-2. NO PERSONAL INFORMATION - Never share or ask for private keys, seed phrases, passwords, personal addresses, or sensitive data
-3. SCAM PROTECTION - Warn users about suspicious links, phishing attempts, or scam requests. Never provide links to unofficial sites.
-4. PROFESSIONAL & HELPFUL - Be friendly, informative, and supportive of the Supra ecosystem
-5. COMMUNITY FOCUS - Help with Supra-related questions, NFTs, ecosystem projects, and general crypto knowledge
-
-If someone asks you to share private information or suspicious links, politely decline and warn them about security risks.`;
+    this.systemPrompt = `You are Zorgbot, a helpful AI assistant for the Supra Heroes Discord community. You must ALWAYS respond in English, regardless of the user's language. Never use German, French, Spanish or any other language - English only. Be friendly, informative, and supportive. Never share private keys, seed phrases, passwords or personal information. Warn users about suspicious links and scam attempts.`;
     
     // Conversation history per user
     this.conversations = new Map(); // userId -> messages[]
@@ -186,6 +177,219 @@ If someone asks you to share private information or suspicious links, politely d
     this.client.on('error', (error) => {
       console.error('❌ Discord client error:', error);
     });
+    
+    // Button interaction handler
+    this.client.on('interactionCreate', async (interaction) => {
+      if (!interaction.isButton()) return;
+      
+      await this.handleButtonInteraction(interaction);
+    });
+  }
+  
+  // Handle button interactions (LP unlock alerts)
+  async handleButtonInteraction(interaction) {
+    const { customId } = interaction;
+    
+    console.log(`🔘 Button clicked: ${customId} by ${interaction.user.username}`);
+    
+    try {
+      // Load alert state
+      const fs = require('fs');
+      const path = require('path');
+      const alertPath = path.join(__dirname, '..', '.lp-unlock-alert.json');
+      
+      if (!fs.existsSync(alertPath)) {
+        await interaction.reply({
+          content: '⚠️ Alert data not found. This alert may have expired.',
+          ephemeral: true
+        });
+        return;
+      }
+      
+      const alertState = JSON.parse(fs.readFileSync(alertPath, 'utf8'));
+      
+      // Handle different button actions
+      if (customId === 'lp_unlock_best_pool') {
+        await this.handleBestPoolSelection(interaction, alertState);
+      } else if (customId === 'lp_unlock_show_all') {
+        await this.handleShowAllPools(interaction, alertState);
+      } else if (customId === 'lp_unlock_cancel') {
+        await this.handleCancelAlert(interaction, alertState);
+      }
+      
+    } catch (error) {
+      console.error('❌ Button interaction error:', error);
+      await interaction.reply({
+        content: '⚠️ Something went wrong. Please try again.',
+        ephemeral: true
+      });
+    }
+  }
+  
+  // Handle best pool selection
+  async handleBestPoolSelection(interaction, alertState) {
+    const bestPool = alertState.topPools[0];
+    const pair = bestPool.coin_3_symbol 
+      ? `${bestPool.coin_1_symbol}/${bestPool.coin_2_symbol}/${bestPool.coin_3_symbol}`
+      : `${bestPool.coin_1_symbol}/${bestPool.coin_2_symbol}`;
+    
+    const apr = bestPool.apr || this.estimateAPR(
+      parseFloat(bestPool.pool_volume_usd || 0),
+      parseFloat(bestPool.pool_tvl_usd || 0),
+      bestPool.swap_fee_bps
+    );
+    
+    const tvl = bestPool.tvl || parseFloat(bestPool.pool_tvl_usd || 0);
+    const score = bestPool.score || 0;
+    const highRisk = bestPool.highRisk || false;
+    
+    let content = `✅ **Selected Best Pool!**\n\n`;
+    content += `**Pool:** ${pair}\n`;
+    content += `**Safety Score:** ${score.toFixed(1)}/100 ${highRisk ? '⚠️ High Risk' : '✅ Safe'}\n`;
+    content += `**APR:** ${apr.toFixed(1)}%${highRisk ? ' ⚠️' : ''}\n`;
+    content += `**TVL:** $${this.formatCompact(tvl)}\n`;
+    content += `**Fee:** ${(bestPool.swap_fee_bps / 100).toFixed(2)}%\n\n`;
+    
+    if (highRisk) {
+      content += `⚠️ **Risk Warning:** This pool has high APR (>200%). `;
+      content += `High APRs can indicate volatility or lower liquidity. Proceed with caution.\n\n`;
+    }
+    
+    content += `**Pool Address:**\n\`${bestPool.pool_address}\`\n\n`;
+    content += `**Next Steps:**\n`;
+    content += `1. Go to Atmos Protocol: https://app.atmos.ag\n`;
+    content += `2. Withdraw your unlocked LP from ${alertState.lock.pair}\n`;
+    content += `3. Provide liquidity to ${pair}\n\n`;
+    content += `_Or use \`!pools info ${bestPool.coin_1_symbol} ${bestPool.coin_2_symbol}\` for more details._`;
+    
+    await interaction.reply({
+      content,
+      ephemeral: false
+    });
+    
+    // Update original message to show selection
+    const message = await interaction.channel.messages.fetch(alertState.messageId);
+    await message.edit({
+      content: `~~Alert processed by ${interaction.user.username}~~`,
+      components: [] // Remove buttons
+    });
+  }
+  
+  // Handle show all pools
+  async handleShowAllPools(interaction, alertState) {
+    await interaction.deferReply({ ephemeral: false });
+    
+    // Use the scoring system from check-lp-unlocks.js
+    const fs = require('fs');
+    const path = require('path');
+    const scriptPath = path.join(__dirname, '..', 'scripts', 'check-lp-unlocks.js');
+    
+    // Load and execute the filtering logic
+    // For simplicity, we'll re-implement the scoring here
+    const atmosPools = require('./scripts/atmos-pools.js');
+    const allPools = await atmosPools.getTopPools(50);
+    
+    // Apply same safety filters
+    const SAFETY_CONFIG = {
+      minTVL: 10000,
+      maxAPR: 500,
+      warnAPR: 200,
+      tvlWeight: 0.6,
+      aprWeight: 0.4
+    };
+    
+    const calculatePoolScore = (pool) => {
+      const tvl = parseFloat(pool.pool_tvl_usd || 0);
+      const apr = this.estimateAPR(
+        parseFloat(pool.pool_volume_usd || 0),
+        tvl,
+        pool.swap_fee_bps
+      );
+      
+      let tvlScore = 0;
+      if (tvl >= 1000000) tvlScore = 100;
+      else if (tvl >= 100000) tvlScore = 70 + (Math.log10(tvl / 100000) / Math.log10(10)) * 30;
+      else if (tvl >= 10000) tvlScore = 40 + (Math.log10(tvl / 10000) / Math.log10(10)) * 30;
+      else tvlScore = (tvl / 10000) * 40;
+      
+      let aprScore = 0;
+      if (apr > SAFETY_CONFIG.maxAPR) aprScore = 0;
+      else if (apr > SAFETY_CONFIG.warnAPR) aprScore = 60 - ((apr - SAFETY_CONFIG.warnAPR) / (SAFETY_CONFIG.maxAPR - SAFETY_CONFIG.warnAPR)) * 40;
+      else if (apr >= 50) aprScore = 60 + ((apr - 50) / (SAFETY_CONFIG.warnAPR - 50)) * 40;
+      else if (apr >= 10) aprScore = 30 + ((apr - 10) / 40) * 30;
+      else aprScore = (apr / 10) * 30;
+      
+      const finalScore = (tvlScore * SAFETY_CONFIG.tvlWeight) + (aprScore * SAFETY_CONFIG.aprWeight);
+      
+      return {
+        score: finalScore,
+        tvl,
+        apr,
+        highRisk: apr > SAFETY_CONFIG.warnAPR,
+        unrealistic: apr > SAFETY_CONFIG.maxAPR,
+        lowLiquidity: tvl < SAFETY_CONFIG.minTVL
+      };
+    };
+    
+    const safePools = allPools
+      .map(pool => ({ ...pool, ...calculatePoolScore(pool) }))
+      .filter(pool => !pool.unrealistic && !pool.lowLiquidity && pool.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 10);
+    
+    let response = `**💧 Top 10 Safe Pools (Filtered by Safety Score)**\n\n`;
+    response += `_Filters: TVL ≥$10k, APR ≤500%, Score = 60% TVL + 40% APR_\n\n`;
+    
+    safePools.forEach((pool, i) => {
+      const pair = pool.coin_3_symbol 
+        ? `${pool.coin_1_symbol}/${pool.coin_2_symbol}/${pool.coin_3_symbol}`
+        : `${pool.coin_1_symbol}/${pool.coin_2_symbol}`;
+      
+      const riskIcon = pool.highRisk ? ' ⚠️' : ' ✅';
+      
+      response += `**${i + 1}. ${pair}**${riskIcon}\n`;
+      response += `   Score: ${pool.score.toFixed(0)} | APR: ${pool.apr.toFixed(1)}% | TVL: $${this.formatCompact(pool.tvl)}\n\n`;
+    });
+    
+    response += `\n✅ = Safe (APR <200%) | ⚠️ = High risk (APR >200%)\n`;
+    response += `_Use \`!pools info <token1> <token2>\` for details._`;
+    
+    await interaction.editReply(response);
+  }
+  
+  // Handle cancel/remind later
+  async handleCancelAlert(interaction, alertState) {
+    await interaction.reply({
+      content: `⏰ **Reminder Snoozed**\n\n` +
+               `I'll remind you again tomorrow about your ${alertState.lock.pair} LP unlock.\n\n` +
+               `Use \`!mylp\` to check your LP status anytime.`,
+      ephemeral: false
+    });
+    
+    // Update original message
+    const message = await interaction.channel.messages.fetch(alertState.messageId);
+    await message.edit({
+      content: `~~Alert snoozed by ${interaction.user.username}~~`,
+      components: []
+    });
+  }
+  
+  // Helper: Estimate APR
+  estimateAPR(volume24h, tvl, feeBps) {
+    if (!tvl || tvl === 0) return 0;
+    const feeRate = feeBps / 10000;
+    const dailyFees = volume24h * feeRate;
+    const yearlyFees = dailyFees * 365;
+    return (yearlyFees / tvl) * 100;
+  }
+  
+  // Helper: Format compact
+  formatCompact(num) {
+    if (!num || isNaN(num)) return '0';
+    if (num >= 1e9) return (num / 1e9).toFixed(2) + 'B';
+    if (num >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+    if (num >= 1e3) return (num / 1e3).toFixed(2) + 'K';
+    return num.toFixed(2);
   }
   
   // Handle custom command
@@ -195,7 +399,7 @@ If someone asks you to share private information or suspicious links, politely d
     console.log(`⚡ [Command]: ${command} from ${message.author.username}`);
     
     try {
-      const response = await this.commands.execute(message.content);
+      const response = await this.commands.execute(message.content, message);
       
       if (response) {
         await message.reply(response);
