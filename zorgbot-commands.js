@@ -627,24 +627,35 @@ Powered by Mistral AI + Supra SDK + Supra Oracle 🤖`;
   // !supra - Get Supra Chain metrics
   async supraCommand(args) {
     try {
-      // Fetch Atmos stats as proxy for Supra Chain (biggest protocol)
-      const atmosData = await this.fetchJSON('https://api.atmos.ag/stats/api/overall-stats');
-      
-      if (!atmosData.success) {
-        return '⚠️ Unable to fetch Supra Chain data right now.';
+      const [atmosData, priceData] = await Promise.all([
+        this.fetchJSON('https://api.atmos.ag/stats/api/overall-stats'),
+        this.fetchJSON('https://api.coingecko.com/api/v3/simple/price?ids=supra&vs_currencies=usd&include_24hr_change=true')
+      ]);
+
+      let response = `**⚡ Supra Network**\n\n`;
+
+      // SUPRA Price
+      if (priceData?.supra) {
+        const price = priceData.supra.usd;
+        const change = priceData.supra.usd_24h_change?.toFixed(2);
+        const changeEmoji = change >= 0 ? '🟢' : '🔴';
+        response += `**$SUPRA:** $${price} ${changeEmoji} ${change}% (24h)\n`;
       }
-      
-      const stats = atmosData.data;
-      
-      let response = `**⛓️ Supra Chain**\n\n`;
-      response += `**Atmos TVL:** $${this.formatNumber(stats.totalPoolTvlUsd)}\n`;
-      response += `**Total Users:** ${this.formatNumber(stats.totalUsers)}\n`;
-      response += `**Active Protocols:** ~12+\n\n`;
-      response += `🔗 **Explorer:** <https://suprascan.io>\n`;
-      response += `📊 **Dashboard:** <https://zorgrk-yommits.github.io/cosmo-dashboard>`;
-      
+
+      // Atmos Stats
+      if (atmosData?.success) {
+        const stats = atmosData.data;
+        response += `**Atmos TVL:** $${this.formatNumber(stats.totalPoolTvlUsd)}\n`;
+        response += `**Total Users:** ${this.formatNumber(stats.totalUsers)}\n`;
+      }
+
+      // Key Facts
+      response += `\n**Consensus:** Moonshot BFT\n`;
+      response += `**Finality:** Sub-second\n`;
+      response += `**TPS:** 500,000+ theoretical`;
+
       return response;
-      
+
     } catch (error) {
       console.error('❌ !supra error:', error.message);
       return '⚠️ Failed to fetch Supra Chain stats.';
